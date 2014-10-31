@@ -9,13 +9,13 @@ from random import randint
 from time import time
 from math import ceil
 
-BLOCK_SIZE = 512
-SM_SIZE = 1024
-NUM_ELEMENTS = 1024
+BLOCK_SIZE = 8
+SM_SIZE = 2 * BLOCK_SIZE
+NUM_ELEMENTS = 13
 
-@jit(argtypes=[float32[:], float32[:], float32[:], uint32], target='gpu')
+@jit(argtypes=[uint32[:], uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveScanGPU(aux_d, out_d, in_d, size):
-    private_shared_in = cuda.shared.array(SM_SIZE, float32)
+    private_shared_in = cuda.shared.array(SM_SIZE, uint32)
     start = 2 * cuda.blockDim.x * cuda.blockIdx.x
     tx = cuda.threadIdx.x
     index = tx + start
@@ -66,7 +66,7 @@ def exclusiveScanGPU(aux_d, out_d, in_d, size):
     out_d[start] = 0.0
 
 
-@jit(argtypes=[float32[:], float32[:], uint32], target='gpu')
+@jit(argtypes=[uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveCombineGPU(out_d, aux_in, size):
     tx = cuda.threadIdx.x
     start = 2 * cuda.blockIdx.x * cuda.blockDim.x
@@ -80,12 +80,13 @@ def exclusiveCombineGPU(out_d, aux_in, size):
 
 
 def preScan(out_d, in_d, in_size):
+
     threads_per_block = (BLOCK_SIZE, 1)
     nBlocks = int(ceil(in_size / (2 * 1.0 * BLOCK_SIZE)))
     number_of_blocks = (nBlocks, 1)
 
-    aux_h = np.empty(nBlocks, dtype=np.float32)
-    aux_oh = np.empty(nBlocks, dtype=np.float32)
+    aux_h = np.empty(nBlocks, dtype=np.uint32)
+    aux_oh = np.empty(nBlocks, dtype=np.uint32)
 
     aux_d = cuda.to_device(aux_h)
     aux_od = cuda.to_device(aux_oh)
@@ -94,7 +95,7 @@ def preScan(out_d, in_d, in_size):
 
     aux_d.copy_to_host(aux_h)
 
-    out_h = np.empty(in_size, dtype=np.float32)
+    out_h = np.empty(in_size, dtype=np.uint32)
 
     out_d.copy_to_host(out_h)
 
@@ -110,26 +111,38 @@ def preScan(out_d, in_d, in_size):
 def main():
 
 
-    in_h = np.empty(NUM_ELEMENTS, dtype=np.float32)
-    out_h = np.zeros(NUM_ELEMENTS, dtype=np.float32)
+    in_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)
+    out_h = np.zeros(NUM_ELEMENTS, dtype=np.uint32)
 
     for i in range(0, NUM_ELEMENTS):
         in_h[i] = 1#randint(0, 100)
 
+    tac1 = time()
+
     in_d = cuda.to_device(in_h)
     out_d = cuda.to_device(out_h)
-
     cuda.synchronize()
+
+    tac2 = time()
+
+    tk1 = time()
 
     preScan(out_d, in_d, NUM_ELEMENTS)
+    tk2 = time()
 
-    cuda.synchronize()
+    th1 = time()
 
     out_d.copy_to_host(out_h)
-
     cuda.synchronize()
+    print "Last = ", out_h[-1] + in_h[-1]
 
-    for i in range(0, NUM_ELEMENTS):
-        print out_h[i]
+    th2 = time()
 
+    #
+    # for i in range(0, NUM_ELEMENTS):
+    #     print out_h[i]
+    #print "Last Output = ", out_h[NUM_ELEMENTS - 1]
+    print "Allocation and Host To Device Copy Time = ", tac2 - tac1
+    print "Kernel Time = ", tk2 - tk1
+    print "Device to Host Copy Time = ", th2 - th1
 main()

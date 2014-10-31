@@ -67,7 +67,7 @@ def test():
     bins_d = cuda.to_device(bins_h)
 
     threads_per_block = (BLOCK_SIZE, 1)
-    number_of_blocks = ((NUM_ELEMENTS / threads_per_block[0]) + 1, 1)
+    number_of_blocks = (int(ceil(NUM_ELEMENTS / (1.0 * threads_per_block[0]))), 1)#((NUM_ELEMENTS / threads_per_block[0]) + 1, 1)
 
     t1 = time()
     histogramGPU [number_of_blocks, threads_per_block] (input_d, bins_d, NUM_ELEMENTS)
