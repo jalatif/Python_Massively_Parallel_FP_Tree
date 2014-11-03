@@ -11,7 +11,7 @@ from math import ceil
 
 BLOCK_SIZE = 1024
 SM_SIZE = 2 * BLOCK_SIZE
-# NUM_ELEMENTS = 10000000
+NUM_ELEMENTS = 1000000
 
 @jit(argtypes=[uint32[:], uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveScanGPU(aux_d, out_d, in_d, size):
@@ -97,15 +97,13 @@ def preScan(out_d, in_d, in_size):
 
     exclusiveCombineGPU [number_of_blocks, threads_per_block] (out_d, aux_od, in_size)
 
-
 def test_scan():
 
-    NUM_ELEMENTS = 8
     in_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)
     out_h = np.zeros(NUM_ELEMENTS, dtype=np.uint32)
 
     for i in range(0, NUM_ELEMENTS):
-        in_h[i] = 1#randint(0, 100)
+        in_h[i] = NUM_ELEMENTS -i - 1#randint(0, 100)
 
     tac1 = time()
 
@@ -117,24 +115,30 @@ def test_scan():
 
     tk1 = time()
 
-    preScan(out_d, in_d, NUM_ELEMENTS)
+    for i in range(0, 32):
+        tk1 = time()
+        preScan(out_d, in_d, NUM_ELEMENTS)
+        cuda.synchronize()
+        tk2 = time()
+        print i, tk2 - tk1
     tk2 = time()
 
     th1 = time()
 
     out_d.copy_to_host(out_h)
     cuda.synchronize()
-    print "Last = ", out_h[-1] + in_h[-1]
+    #print "Last = ", out_h[-1] + in_h[-1]
 
     th2 = time()
 
     #
     # for i in range(0, NUM_ELEMENTS):
     #     print out_h[i]
+
     #print "Last Output = ", out_h[NUM_ELEMENTS - 1]
-    print "Allocation and Host To Device Copy Time = ", tac2 - tac1
-    print "Kernel Time = ", tk2 - tk1
-    print "Device to Host Copy Time = ", th2 - th1
+    # print "Allocation and Host To Device Copy Time = ", tac2 - tac1
+    # print "Kernel Time = ", tk2 - tk1
+    # print "Device to Host Copy Time = ", th2 - th1
 
 if __name__ == "__main__":
     test_scan()

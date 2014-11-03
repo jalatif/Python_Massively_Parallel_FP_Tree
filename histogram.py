@@ -53,7 +53,7 @@ def makeHist(input_h):
 
     return bins_h
 
-def test():
+def test_histogram():
     #Allocate host memory
     input_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)
     bins_h = np.zeros(BIN_SIZE, dtype=np.uint32)
@@ -95,5 +95,5 @@ def test():
     else:
         print "Test Failed"
 
-test() # Run the program
+test_histogram() # Run the program
 
