@@ -12,7 +12,7 @@ from exclusive_scan import preScan
 
 BLOCK_SIZE = 4
 SM_SIZE = 2 * BLOCK_SIZE
-NUM_ELEMENTS = 1000000
+NUM_ELEMENTS = 16
 DATA_TYPE = 32
 
 
@@ -124,6 +124,12 @@ def RadixGPU(in_d, out_d, in_size):
         out_d[index + BLOCK_SIZE] = private_shared_in[tx + BLOCK_SIZE]
 
 
+@jit(argtypes=[uint32[:], uint32], target='gpu')
+def is_sorted(in_d, out_bool):
+    tx = cuda.threadIdx.x
+    index = tx + cuda.blockDim.x * cuda.blockIdx.x
+
+
 def test_sort():
     in_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)  #4, 7, 2, 6, 3, 5, 1, 0
     #in_h = np.array([4, 7, 2, 6, 3, 5, 1, 0], dtype=np.uint32)
@@ -133,7 +139,6 @@ def test_sort():
 
     in_d = cuda.to_device(in_h)
     out_d = cuda.device_array(NUM_ELEMENTS, dtype=np.uint32)
-    #temp_d = cuda.device_array(NUM_ELEMENTS, dtype=np.uint32)
 
     tkg1 = time()
 
@@ -146,12 +151,12 @@ def test_sort():
 
     out_d.copy_to_host(out_h)
     cuda.synchronize()
-    #
-    # line = ""
-    # for i in range(0, NUM_ELEMENTS):
-    #     line += " " + str(out_h[i])
-    #
-    # print line
+
+    line = ""
+    for i in range(0, NUM_ELEMENTS):
+        line += " " + str(out_h[i])
+
+    print line
 
     in_cpu = [NUM_ELEMENTS - i -1 for i in range(0, NUM_ELEMENTS)]
     tc1 = time()

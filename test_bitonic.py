@@ -10,9 +10,9 @@ from math import ceil
 NUM_ELEMENTS = 16
 BLOCK_SIZE = 4
 
-def test_bitonic_sortCPU(b1, b2):
-    ans = []
-    if len(b1) == 1:
+def test_bitonic_sortCPU(b1, b2, in_size):
+    ans = np.empty(2 * in_size)
+    if b1.size == 1:
         if b1[0] > b2[0]:
             return [b2[0], b1[0]]
         else:
@@ -31,17 +31,16 @@ def test_bitonic_sortCPU(b1, b2):
     return ans
 
 def bitonicSort():
-
+    pass
 if __name__=="__main__":
 
 
-    b1 = [1, 11, 21, 31]
-    b2 = [2, 5, 10, 40]
-    b2.reverse()
+    b1 = np.array([1, 11, 21, 31], dtype=np.uint32)
+    b2 = np.array([2, 5, 10, 40], dtype=np.uint32)
 
 
     for i in range(0, 4):
+        pass
 
-
-    print test_bitonic_sortCPU(b1, b2)
+    print test_bitonic_sortCPU(b1, b2, 4)
 
