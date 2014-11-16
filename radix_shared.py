@@ -12,7 +12,7 @@ from exclusive_scan import preScan
 
 BLOCK_SIZE = 4
 SM_SIZE = 2 * BLOCK_SIZE
-NUM_ELEMENTS = 32 #10000000#1024 * 1024 * 128
+NUM_ELEMENTS = 10000000#1024 * 1024 * 128
 DATA_TYPE = 32
 
 
@@ -123,57 +123,57 @@ def RadixGPU(in_d, out_d, in_size):
     if (index + BLOCK_SIZE) < in_size:
         out_d[index + BLOCK_SIZE] = private_shared_in[tx + BLOCK_SIZE]
 
-
-@jit(argtypes=[uint32[:], uint32, uint32], target='gpu')
-def bitonicSort(in_d, in_size, stride):
-    tx = cuda.threadIdx.x
-    start = stride * cuda.blockDim.x * cuda.blockIdx.x
-    pstart = start
-    index = start + tx
-
-    for i in range(0, stride / 2):
-        k = stride - 2 * i
-        pstart = start + i * BLOCK_SIZE
-
-        v1 = in_d[pstart + tx]
-        v2 = in_d[pstart + k * BLOCK_SIZE - 1 - tx]
-
-        if v2 > v1:
-            min1 = v1
-            max1 = v2
-        else:
-            min1 = v2
-            max1 = v1
-
-        in_d[pstart + tx] = min1
-        in_d[pstart + k * BLOCK_SIZE - 1 - tx] = max1
-
-    cuda.syncthreads()
-    stride /= 2
-
-    j = 2
-    while stride >= 0:
-        for i in range(0, j * stride / 2):
-            pstart = start + 2 * i * BLOCK_SIZE
-
-            v1 = in_d[pstart + tx]
-            v2 = in_d[pstart + tx + stride / 2 * BLOCK_SIZE]
-
-            if v2 > v1:
-                min1 = v1
-                max1 = v2
-            else:
-                min1 = v2
-                max1 = v1
-
-            in_d[pstart + tx] = min1
-            in_d[pstart + tx + stride / 2 * BLOCK_SIZE] = max1
-
-        cuda.syncthreads()
-        if stride == 1:
-            break
-        stride /= 2
-        j *= 2
+#
+# @jit(argtypes=[uint32[:], uint32, uint32], target='gpu')
+# def bitonicSort(in_d, in_size, stride):
+#     tx = cuda.threadIdx.x
+#     start = stride * cuda.blockDim.x * cuda.blockIdx.x
+#     pstart = start
+#     index = start + tx
+#
+#     for i in range(0, stride / 2):
+#         k = stride - 2 * i
+#         pstart = start + i * BLOCK_SIZE
+#
+#         v1 = in_d[pstart + tx]
+#         v2 = in_d[pstart + k * BLOCK_SIZE - 1 - tx]
+#
+#         if v2 > v1:
+#             min1 = v1
+#             max1 = v2
+#         else:
+#             min1 = v2
+#             max1 = v1
+#
+#         in_d[pstart + tx] = min1
+#         in_d[pstart + k * BLOCK_SIZE - 1 - tx] = max1
+#
+#     cuda.syncthreads()
+#     stride /= 2
+#
+#     j = 2
+#     while stride >= 0:
+#         for i in range(0, j * stride / 2):
+#             pstart = start + 2 * i * BLOCK_SIZE
+#
+#             v1 = in_d[pstart + tx]
+#             v2 = in_d[pstart + tx + stride / 2 * BLOCK_SIZE]
+#
+#             if v2 > v1:
+#                 min1 = v1
+#                 max1 = v2
+#             else:
+#                 min1 = v2
+#                 max1 = v1
+#
+#             in_d[pstart + tx] = min1
+#             in_d[pstart + tx + stride / 2 * BLOCK_SIZE] = max1
+#
+#         cuda.syncthreads()
+#         if stride == 1:
+#             break
+#         stride /= 2
+#         j *= 2
 
 # @jit(argtypes=[uint32[:], uint32], target='gpu')
 # def is_sorted(in_d, out_bool):
@@ -182,13 +182,13 @@ def bitonicSort(in_d, in_size, stride):
 #
 
 def test_sort():
-    #in_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)  #4, 7, 2, 6, 3, 5, 1, 0
+    in_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)  #4, 7, 2, 6, 3, 5, 1, 0
     #in_h = np.array([4, 7, 2, 6, 3, 5, 1, 0], dtype=np.uint32)
     out_h = np.empty(NUM_ELEMENTS, dtype=np.uint32)
-    # for i in range(0, NUM_ELEMENTS):
-    #     in_h[i] = randint(0, 100)#NUM_ELEMENTS - i - 1
+    for i in range(0, NUM_ELEMENTS):
+        in_h[i] = randint(0, 100)#NUM_ELEMENTS - i - 1
     #in_h = np.array([6, 44, 71, 79, 94, 92, 12, 56, 47, 17, 81, 98, 84,  9, 85, 99], dtype=np.uint32)
-    in_h = np.array([85, 37, 50, 73, 51, 46, 62, 84, 65, 99, 76, 59, 73, 16, 27, 4, 75, 81, 80, 33, 73, 11, 29, 24, 81, 49, 27, 71, 74, 64, 60, 91], dtype=np.uint32)
+    #in_h = np.array([85, 37, 50, 73, 51, 46, 62, 84, 65, 99, 76, 59, 73, 16, 27, 4, 75, 81, 80, 33, 73, 11, 29, 24, 81, 49, 27, 71, 74, 64, 60, 91], dtype=np.uint32)
     print in_h
 
     in_d = cuda.to_device(in_h)
@@ -201,20 +201,20 @@ def test_sort():
 
     RadixGPU [number_of_blocks, threads_per_block] (in_d, out_d, NUM_ELEMENTS)
     out_d.copy_to_host(out_h)
-    print "Rad = ", list(out_h)
+    #print "Rad = ", list(out_h)
 
     stride = 4
-    while stride < NUM_ELEMENTS:
-        number_of_blocks = (int(ceil(NUM_ELEMENTS / (stride * 1.0 * threads_per_block[0]))), 1)
-        bitonicSort [number_of_blocks, threads_per_block] (out_d, NUM_ELEMENTS, stride)
-        stride *= 2
-        # number_of_blocks = (int(ceil(NUM_ELEMENTS / (2 * 1.0 * threads_per_block[0]))), 1)
-        # RadixGPU [number_of_blocks, threads_per_block] (out_d, in_d, NUM_ELEMENTS)
-        # out_d = in_d
-        out_d.copy_to_host(out_h)
-        print "Str = ", list(out_h)
-        break
-    # stride /= 2
+    # while stride < NUM_ELEMENTS:
+    #     number_of_blocks = (int(ceil(NUM_ELEMENTS / (stride * 1.0 * threads_per_block[0]))), 1)
+    #     bitonicSort [number_of_blocks, threads_per_block] (out_d, NUM_ELEMENTS, stride)
+    #     stride *= 2
+    #     # number_of_blocks = (int(ceil(NUM_ELEMENTS / (2 * 1.0 * threads_per_block[0]))), 1)
+    #     # RadixGPU [number_of_blocks, threads_per_block] (out_d, in_d, NUM_ELEMENTS)
+    #     # out_d = in_d
+    #     out_d.copy_to_host(out_h)
+    #     print "Str = ", list(out_h)
+    #     break
+    # # stride /= 2
     # while stride >= 4:
     #     number_of_blocks = (int(ceil(NUM_ELEMENTS / (stride * 1.0 * threads_per_block[0]))), 1)
     #     bitonicSort [number_of_blocks, threads_per_block] (out_d, NUM_ELEMENTS, stride)
@@ -238,7 +238,7 @@ def test_sort():
 
     out_d.copy_to_host(out_h)
     cuda.synchronize()
-    print "GPU = ", list(out_h)
+    #print "GPU = ", list(out_h)
     # line = ""
     # for i in range(0, NUM_ELEMENTS):
     #     line += " " + str(out_h[i])
@@ -248,7 +248,7 @@ def test_sort():
     in_cpu = list(in_h)#[NUM_ELEMENTS - i -1 for i in range(0, NUM_ELEMENTS)]
     tc1 = time()
     in_cpu.sort()
-    print "CPU = ", in_cpu
+    #print "CPU = ", in_cpu
     tc2 = time()
 
     print "GPU Time = ", tkg2 - tkg1
