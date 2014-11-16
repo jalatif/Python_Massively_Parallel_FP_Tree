@@ -11,13 +11,13 @@ from pprint import pprint
 import sys
 
 NUM_ELEMENTS = 12#1000000
-MAX_UNIQUE_ITEMS = 7
-BLOCK_SIZE = 2
+MAX_UNIQUE_ITEMS = 6
+BLOCK_SIZE = 4
 MAX_ITEM_PER_SM = 4
-MAX_TRANSACTIONS_PER_SM = 10
-MAX_ITEMS_PER_TRANSACTIONS = 10
+MAX_TRANSACTIONS_PER_SM = 2
+MAX_ITEMS_PER_TRANSACTIONS = 4
 MAX_TRANSACTIONS = 4
-SM_SHAPE = MAX_TRANSACTIONS_PER_SM * MAX_ITEMS_PER_TRANSACTIONS
+SM_SHAPE = (MAX_TRANSACTIONS_PER_SM, MAX_ITEMS_PER_TRANSACTIONS)
 
 @jit(argtypes=[int32[:], int32[:], int32], target='gpu')
 def histogramGPU(input_d, bins_d, num_elements):
@@ -73,7 +73,9 @@ def selfJoinGPU(input_d, output_d, num_elements):
         loop_tx = tx + i * BLOCK_SIZE
         for j in range(loop_tx + 1, MAX_ITEM_PER_SM):
             if (sm1[loop_tx] / 10) == (sm1[j] / 10):
-                output_d[(start + loop_tx) * num_elements + (start + j)] = 1
+                output_d[(start + loop_tx) * num_elements + (start + j)] = 0
+            else:
+                output_d[(start + loop_tx) * num_elements + (start + j)] = -1
 
 
     for smid in range(cuda.blockIdx.x + 1, ceil(num_elements / (1.0 * MAX_ITEM_PER_SM))):
@@ -88,72 +90,147 @@ def selfJoinGPU(input_d, output_d, num_elements):
             loop_tx = tx + i * BLOCK_SIZE
             for j in range(0, MAX_ITEM_PER_SM):
                 if (sm1[loop_tx] / 10) == (sm2[j] / 10):
-                    output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = 1
+                    output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = 0
+                else:
+                    output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = -1
 
     #cuda.syncthreads()
 
-@jit(argtypes=[int32[:], int32[:], int32, int32[:], int32[:,:], int32], target='gpu')
-def findFrequencyGPU(d_transactions, d_offsets, num_transactions, dkeyIndex, dMask, num_patterns):
-
+@jit(argtypes=[int32[:], int32[:], int32, int32, int32[:], int32[:], int32], target='gpu')
+def findFrequencyGPU(d_transactions, d_offsets, num_transactions, num_elements, dkeyIndex, dMask, num_patterns):
     Ts = cuda.shared.array(SM_SHAPE, int32)
-    transaction_start_index = cuda.blockDim.x * cuda.blockIdx.x
+    tx = cuda.threadIdx.x
 
-    while transaction_start_index < num_transactions:
-        index = cuda.threadIdx.x
-        transaction_end_index = transaction_start_index + cuda.blockDim.x
+    index = tx + cuda.blockDim.x * cuda.blockIdx.x
+    trans_index = cuda.blockIdx.x * MAX_TRANSACTIONS_PER_SM
 
-        cuda.syncthreads()
+    for i in range(0, MAX_TRANSACTIONS_PER_SM):
+        if tx < MAX_ITEMS_PER_TRANSACTIONS:
+            Ts[i, tx] = -1
 
-        #Clear SM
+    cuda.syncthreads()
 
-        for i in range(0, MAX_TRANSACTIONS_PER_SM):
-            while index < MAX_ITEMS_PER_TRANSACTIONS:
-                Ts[i * MAX_ITEMS_PER_TRANSACTIONS + index] = 0
-                index += cuda.blockDim.x
+    for i in range(0, MAX_TRANSACTIONS_PER_SM):
+        item_ends = num_elements
+        if (trans_index + i + 1) == num_transactions:
+            item_ends = num_elements
+        elif (trans_index + i + 1) < num_transactions:
+            item_ends = d_offsets[trans_index + i + 1]
+        else:
+            continue
+        if (tx + d_offsets[trans_index + i]) < item_ends and tx < MAX_ITEMS_PER_TRANSACTIONS:
+            Ts[i, tx] = d_transactions[d_offsets[trans_index + i] + tx]
+            #d_transactions[d_offsets[trans_index + i] + tx] += 1
 
-            cuda.syncthreads()
+    cuda.syncthreads()
 
-        for i in range(transaction_start_index, transaction_end_index):
-            if i >= num_transactions:
-                break
-            start_offset = d_offsets[i]
-            end_offset = d_offsets[i + 1]
-            index1 = start_offset + cuda.threadIdx.x
+    for mask_id in range(0, int(ceil(num_patterns / 1.0 * cuda.blockDim.x))):
+        loop_tx = cuda.threadIdx.x + mask_id * cuda.blockDim.x
 
-            cuda.syncthreads()
+        for last_seen in range(0, num_patterns):
+            if dMask[loop_tx * num_patterns + last_seen] < 0:
+                last_seen += 1
+                continue
+            item1 = dkeyIndex[loop_tx]
+            item2 = dkeyIndex[last_seen]
+            for tid in range(0, MAX_TRANSACTIONS_PER_SM):
+                flag1 = False
+                flag2 = False
+                for titem in range(0, MAX_ITEMS_PER_TRANSACTIONS):
+                    if Ts[tid, titem] == item1: flag1 = True
+                    elif Ts[tid, titem] == item2: flag2 = True
 
-            #threads collaborate to get the ith transaction
+                present_flag = flag1 and flag2
+                if present_flag:
+                    cuda.atomic.add(dMask, loop_tx * num_patterns + last_seen, 1)
 
-            while index1 < end_offset:
-                Ts[(i - transaction_start_index) * MAX_ITEMS_PER_TRANSACTIONS + (index1 - start_offset)] = d_transactions[index1]
-                index1 += cuda.blockDim.x
 
-            cuda.syncthreads()
 
-        if cuda.threadIdx.x < MAX_TRANSACTIONS_PER_SM:
-            for j in range(0, MAX_ITEMS_PER_TRANSACTIONS):
-                Ts[cuda.threadIdx.x * MAX_ITEMS_PER_TRANSACTIONS + j] += 1
+    # for i in range(0, ( num_transactions / 1.0 * cuda.blockDim.x)):
+    #     location_x = tx + i * cuda.blockDim.x
+    #     item_ends = 0
+    #     if index == (num_transactions - 1):
+    #         item_ends =
+    #     elif index < (num_transactions - 1):
+    #         item_ends = d_offsets[index + 1]
+    #     else:
+    #         item_ends = 0
+    #
+    #     for j in range(d_offsets[i], d_offsets[i + 1]):
+    #
+    #
 
-        cuda.syncthreads()
-        for i in range(transaction_start_index, transaction_end_index):
-            if i >= num_transactions:
-                break
-
-            start_offset = d_offsets[i]
-            end_offset = d_offsets[i + 1]
-            index1 = start_offset + cuda.threadIdx.x
-
-            cuda.syncthreads()
-
-            #threads collaborate to get the ith transaction
-
-            while index1 < end_offset:
-                d_transactions[index1] = Ts[(i - transaction_start_index) * MAX_ITEMS_PER_TRANSACTIONS + (index1 - start_offset)]
-                index1 += cuda.blockDim.x
-
-            cuda.syncthreads()
-
-        transaction_start_index += cuda.blockDim.x * cuda.gridDim.x
+    #
+    # while transaction_start_index < num_transactions:
+    #     index = cuda.threadIdx.x
+    #     transaction_end_index = transaction_start_index + cuda.blockDim.x
+    #
+    #     cuda.syncthreads()
+    #
+    #     #Clear SM
+    #
+    #     for i in range(0, MAX_TRANSACTIONS_PER_SM):
+    #         while index < MAX_ITEMS_PER_TRANSACTIONS:
+    #             Ts[i, index] = -1
+    #             index += cuda.blockDim.x
+    #
+    #         cuda.syncthreads()
+    #
+    #     for i in range(transaction_start_index, transaction_end_index):
+    #         if i >= num_transactions:
+    #             break
+    #         start_offset = d_offsets[i]
+    #         end_offset = d_offsets[i + 1]
+    #         index1 = start_offset + cuda.threadIdx.x
+    #
+    #         cuda.syncthreads()
+    #
+    #         #threads collaborate to get the ith transaction
+    #
+    #         while index1 < end_offset:
+    #             Ts[(i - transaction_start_index), (index1 - start_offset)] = d_transactions[index1]
+    #             index1 += cuda.blockDim.x
+    #
+    #         cuda.syncthreads()
+    #
+    #     if cuda.threadIdx.x < MAX_TRANSACTIONS_PER_SM:
+    #         # for j in range(0, MAX_ITEMS_PER_TRANSACTIONS):
+    #         #     Ts[cuda.threadIdx.x, j] += 1
+    #         print 111
+    #         for mask_id in range(0, int(ceil(num_patterns / 1.0 * cuda.blockDim.x))):
+    #             loop_tx = cuda.threadIdx.x + mask_id * cuda.blockDim.x
+    #
+    #             for last_seen in range(0, num_patterns):
+    #                 if dMask[loop_tx * num_patterns + last_seen] < 0:
+    #                     last_seen += 1
+    #                     continue
+    #                 item1 = dkeyIndex[loop_tx]
+    #                 item2 = dkeyIndex[last_seen]
+    #                 # if loop_tx == 0:
+    #                 #     print last_seen
+    #                 #     print -2
+    #                 #     print loop_tx
+    #                 #     print -3
+    #                 #     print item1
+    #                 #     print -4
+    #                 #     print item2
+    #                 #     print -5
+    #                 for tid in range(0, MAX_TRANSACTIONS_PER_SM):
+    #                     flag1 = False
+    #                     flag2 = False
+    #                     for titem in range(0, MAX_ITEMS_PER_TRANSACTIONS):
+    #                         if Ts[tid, titem] == item1: flag1 = True
+    #                         elif Ts[tid, titem] == item2: flag2 = True
+    #
+    #                     present_flag = flag1 and flag2
+    #                     # print -6
+    #                     # print titem
+    #                     # print -7
+    #                     # print present_flag
+    #                     if present_flag:
+    #                         cuda.atomic.add(dMask, loop_tx * num_patterns + last_seen, 1)
+    #     break
+    #     transaction_start_index += cuda.blockDim.x * cuda.gridDim.x
 
 def selfJoinCPU(input_cpu):
     output_cpu = []
@@ -228,7 +305,7 @@ def test_apriori():
 
     # k = 10000
 
-    ci_h = np.zeros(k ** 2, dtype=np.int32)
+    ci_h = np.array([-1 for i in range(0, k ** 2)], dtype=np.int32)
     ci_d = cuda.to_device(ci_h)
 
     #li_h = np.array(sorted([randint(10, 99) for i in range(0, k)]), dtype=np.int32)
@@ -238,19 +315,31 @@ def test_apriori():
     number_of_blocks = (int(ceil(k / MAX_ITEM_PER_SM)), 1)
     selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k)
 
+    li_d.copy_to_host(li_h)
     ci_d.copy_to_host(ci_h)
     t2 = time()
 
-    print t2 - t1
+
+    #ci_h = ci_h.reshape(k, k)
+
+    print "Initial Mask = ", ci_h
+
+    #print t2 - t1
 
     d_offsets = cuda.to_device(offsets)
     d_transactions = cuda.to_device(transactions)
 
     threads_per_block = (BLOCK_SIZE, 1)
-    number_of_blocks = (int(num_transactions / (1.0 * threads_per_block[0])) + 1, 1)
+    #number_of_blocks = (1, 1) #(int(num_transactions / (1.0 * threads_per_block[0])) + 1, 1)
+    number_of_blocks = (int(ceil(num_transactions / (1.0 * MAX_TRANSACTIONS_PER_SM))), 1)
 
-    findFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, li_d, ci_d, k)
-
+    print "Num transactions = ", num_transactions
+    print "Num patterns = ", k
+    print "index = ", li_h
+    findFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, num_elements, li_d, ci_d, k)
+    cuda.synchronize()
+    ci_d.copy_to_host(ci_h)
+    print "Final Mask = ", ci_h
     d_transactions.copy_to_host(transactions)
 
     print transactions[:num_elements]
@@ -261,9 +350,6 @@ def test_apriori():
     #selfJoinCPU(li_cpu)
     t4 = time()
     print t4 - t3
-    ci_h = ci_h.reshape(k, k)
-
-    print(ci_h.tolist())
 
 if __name__ == "__main__":
     test_apriori()
