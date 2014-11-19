@@ -149,8 +149,8 @@ def pruneMultipleGPU(input_d, num_patterns, min_sup):
         if input_d[data_index] < min_sup:
             input_d[data_index] = 0
 
-@jit(argtypes=[int32[:], int32[:], int32], target='gpu')
-def selfJoinGPU(input_d, output_d, num_elements):
+@jit(argtypes=[int32[:], int32[:], int32, int32], target='gpu')
+def selfJoinGPU(input_d, output_d, num_elements, power):
     tx = cuda.threadIdx.x
     #index = tx + cuda.blockIdx.x * cuda.blockDim.x
     start = cuda.blockIdx.x * MAX_ITEM_PER_SM
@@ -169,7 +169,7 @@ def selfJoinGPU(input_d, output_d, num_elements):
     for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
         loop_tx = tx + i * BLOCK_SIZE
         for j in range(loop_tx + 1, MAX_ITEM_PER_SM):
-            if (sm1[loop_tx] / 10) == (sm1[j] / 10):
+            if (sm1[loop_tx] / 10 ** power) == (sm1[j] / 10 ** power):
                 output_d[(start + loop_tx) * num_elements + (start + j)] = 0
             else:
                 output_d[(start + loop_tx) * num_elements + (start + j)] = -1
@@ -186,7 +186,7 @@ def selfJoinGPU(input_d, output_d, num_elements):
         for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
             loop_tx = tx + i * BLOCK_SIZE
             for j in range(0, MAX_ITEM_PER_SM):
-                if (sm1[loop_tx] / 10) == (sm2[j] / 10):
+                if (sm1[loop_tx] / 10 ** power) == (sm2[j] / 10 ** power):
                     output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = 0
                 else:
                     output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = -1
@@ -308,6 +308,12 @@ def test_apriori():
     print num_elements
     min_support = 2
 
+    power = 1
+    while MAX_UNIQUE_ITEMS / (10 ** power) != 0:
+        power += 1
+
+    print "Power = ", power
+
     t = [item for item in transactions.tolist()]
 
 
@@ -338,7 +344,7 @@ def test_apriori():
             li_h[k] = j
             k += 1
 
-    print li_h, k
+    print "LI_H = ", li_h, k
 
     #k = 10000
 
@@ -350,7 +356,7 @@ def test_apriori():
     t1 = time()
     li_d = cuda.to_device(li_h)
     number_of_blocks = (int(ceil(k / MAX_ITEM_PER_SM)), 1)
-    selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k)
+    selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k, power)
 
     li_d.copy_to_host(li_h)
     ci_d.copy_to_host(ci_h)
@@ -404,6 +410,7 @@ def test_apriori():
     preScan(ci_dnx, ci_dn, k)
 
     ci_dnx.copy_to_host(ci_hnx)
+    num_patterns = ci_hnx[-1]
     print list(ci_hnx)
 
     sparseM_h = np.empty(ci_hnx[-1] * 3, dtype=np.uint32)
@@ -416,15 +423,87 @@ def test_apriori():
 
     sparseM_d.copy_to_host(sparseM_h)
 
-    sparseM_h = sparseM_h.reshape(3, ci_hnx[-1])
-    print sparseM_h
+    # sparseM_h = sparseM_h.reshape(3, num_patterns)
+    print sparseM_h.reshape(3, num_patterns)
 
-    li_cpu = list(li_h)#[randint(10, 99) for i in range(0, 10000)]#list(li_h)
+    patterns = {}
+    for i in range(0, num_patterns):
+        item1 = sparseM_h[i]
+        item2 = sparseM_h[i + num_patterns]
+        support = sparseM_h[i + 2 * num_patterns]
+        patterns[tuple(sorted([li_h[item1], li_h[item2]]))] = support
+    print patterns
 
-    t3 = time()
-    selfJoinCPU(li_cpu)
-    t4 = time()
-    print t4 - t3
+    new_modulo_map = {}
+    index_id = 1
+
+    #patterns = {(2, 3, 5) : 1, (2, 3, 6) : 1, (2, 3, 7) : 1, (2, 4, 5) : 1, (2, 4, 7) : 1, (3, 5, 7) : 1}
+    for pattern in patterns:
+        if pattern[:-1] not in new_modulo_map:
+            new_modulo_map[pattern[:-1]] = index_id
+            index_id += 1
+
+        if (pattern[-1],) not in new_modulo_map:
+            new_modulo_map[(pattern[-1],)] = index_id
+            index_id += 1
+
+
+    print new_modulo_map
+
+    new_patterns = []
+    for pattern in patterns:
+        new_patterns.append((new_modulo_map[pattern[:-1]], new_modulo_map[(pattern[-1],)]))
+    print new_patterns
+
+    new_new_pattern = []
+    for pattern in new_patterns:
+        new_new_pattern.append(pattern[0] * 10 ** power + pattern[1])
+
+    new_new_pattern.sort()
+    print new_new_pattern
+
+    k = len(new_new_pattern)
+
+    li_h = np.array(new_new_pattern, dtype=np.int32)
+
+    ci_h = np.array([-1 for i in range(0, k ** 2)], dtype=np.int32)
+    ci_d = cuda.to_device(ci_h)
+
+    #li_h = np.array(sorted([randint(10, 99) for i in range(0, k)]), dtype=np.int32)
+
+    t1 = time()
+    li_d = cuda.to_device(li_h)
+    number_of_blocks = (int(ceil(k / MAX_ITEM_PER_SM)), 1)
+    selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k, power)
+
+    li_d.copy_to_host(li_h)
+    ci_d.copy_to_host(ci_h)
+    t2 = time()
+    print "LI_H = ", li_h
+    print "Initial Mask = ", ci_h
+
+    threads_per_block = (BLOCK_SIZE, 1)
+    #number_of_blocks = (1, 1) #(int(num_transactions / (1.0 * threads_per_block[0])) + 1, 1)
+    number_of_blocks = (int(ceil(num_transactions / (1.0 * MAX_TRANSACTIONS_PER_SM))), 1)
+
+    print "Num transactions = ", num_transactions
+    print "Num patterns = ", k
+    print "index = ", li_h
+    findFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, num_elements, li_d, ci_d, k)
+    cuda.synchronize()
+    ci_d.copy_to_host(ci_h)
+    print "Final Mask = ", ci_h
+    d_transactions.copy_to_host(transactions)
+    #
+    # print transactions[:num_elements]
+    #
+    # threads_per_block = (BLOCK_SIZE, BLOCK_SIZE)
+    # number_of_blocks = ((int(ceil(k / (1.0 * threads_per_block[0])))), (int(ceil(k / (1.0 * threads_per_block[0])))))
+    #
+    # pruneMultipleGPU [number_of_blocks, threads_per_block] (ci_d, k, min_support)
+    #
+    # ci_d.copy_to_host(ci_h)
+    # print "Outer Mask = ", ci_h.reshape(4, 4)
 
 if __name__ == "__main__":
     test_apriori()
