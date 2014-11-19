@@ -11,7 +11,7 @@ from math import ceil
 
 BLOCK_SIZE = 1024
 SM_SIZE = 2 * BLOCK_SIZE
-NUM_ELEMENTS = 1000000
+NUM_ELEMENTS = 4#1000000
 
 @jit(argtypes=[uint32[:], uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveScanGPU(aux_d, out_d, in_d, size):
