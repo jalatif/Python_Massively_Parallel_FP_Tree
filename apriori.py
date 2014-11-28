@@ -10,16 +10,18 @@ from math import ceil
 from pprint import pprint
 import sys
 
-NUM_ELEMENTS = 12#1000000
-MAX_UNIQUE_ITEMS = 6
+NUM_ELEMENTS = 32#1000000
+MAX_UNIQUE_ITEMS = 16 # in range 1-6
 MAX_PATTERN_SEARCH = 5
 BLOCK_SIZE = 4
 SM_SIZE = 2 * BLOCK_SIZE
-MAX_ITEM_PER_SM = 4
-MAX_TRANSACTIONS_PER_SM = 2
-MAX_ITEMS_PER_TRANSACTIONS = 4
+MAX_ITEM_PER_SM = 16
+MAX_TRANSACTIONS_PER_SM = 8
+MAX_ITEMS_PER_TRANSACTIONS = 6
 MAX_TRANSACTIONS = 4
 SM_SHAPE = (MAX_TRANSACTIONS_PER_SM, MAX_ITEMS_PER_TRANSACTIONS)
+SM_MAX_SIZE = 12288
+MIN_SUPPORT = 2
 
 @jit(argtypes=[uint32[:], uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveScanGPU(aux_d, out_d, in_d, size):
@@ -107,26 +109,34 @@ def preScan(out_d, in_d, in_size):
 
 @jit(argtypes=[int32[:], int32[:], int32], target='gpu')
 def histogramGPU(input_d, bins_d, num_elements):
-    private_bin = cuda.shared.array(MAX_UNIQUE_ITEMS, uint32)
+    private_bin = cuda.shared.array(SM_MAX_SIZE, int32)
     tx = cuda.threadIdx.x
-    index = cuda.grid(1) #tx + cuda.blockDim.x * cuda.blockIdx.x
+    index = tx + cuda.blockDim.x * cuda.blockIdx.x
+    stride = cuda.blockDim.x * cuda.gridDim.x
+
     location_x = 0
-    for i in range(0, ceil(MAX_UNIQUE_ITEMS / (1.0 * BLOCK_SIZE))):
+    for i in range(0, ceil(SM_MAX_SIZE / (1.0 * BLOCK_SIZE))):
         location_x = tx + i * BLOCK_SIZE
-        if location_x < MAX_UNIQUE_ITEMS:
+        if location_x < MAX_UNIQUE_ITEMS and location_x < SM_MAX_SIZE:
             private_bin[location_x] = 0
 
     cuda.syncthreads()
 
-    if index < num_elements and input_d[index] < MAX_UNIQUE_ITEMS:
-        cuda.atomic.add(private_bin, input_d[index], 1)
-        #cuda.atomic.add(bins_d, input_d[index], 1)
+    element = 0
+    while index < num_elements:
+        element = input_d[index]
+        if element < SM_MAX_SIZE:
+            cuda.atomic.add(private_bin, element, 1)
+        else:
+            cuda.atomic.add(bins_d, element, 1)
+
+        index += stride
 
     cuda.syncthreads()
 
-    for i in range(0, ceil(MAX_UNIQUE_ITEMS / (1.0 * BLOCK_SIZE))):
+    for i in range(0, ceil(SM_MAX_SIZE / (1.0 * BLOCK_SIZE))):
         location_x = tx + i * BLOCK_SIZE
-        if location_x < MAX_UNIQUE_ITEMS:
+        if location_x < MAX_UNIQUE_ITEMS and location_x < SM_MAX_SIZE:
             cuda.atomic.add(bins_d, location_x, private_bin[location_x])
 
 @jit(argtypes=[int32[:], int32, int32], target='gpu')
@@ -159,38 +169,57 @@ def selfJoinGPU(input_d, output_d, num_elements, power):
     sm1 = cuda.shared.array(MAX_ITEM_PER_SM, int32)
     sm2 = cuda.shared.array(MAX_ITEM_PER_SM, int32)
 
+    actual_items_per_sm = num_elements - start
+
+    if actual_items_per_sm >= MAX_ITEM_PER_SM:
+        actual_items_per_sm = MAX_ITEM_PER_SM
+
     for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
         location_x = tx + i * BLOCK_SIZE
-        if location_x < MAX_ITEM_PER_SM:
+        if location_x < actual_items_per_sm and (start + location_x) < num_elements:
             sm1[location_x] = input_d[start + location_x]
+        else:
+            sm1[location_x] = 0
 
     cuda.syncthreads()
 
 
     for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
         loop_tx = tx + i * BLOCK_SIZE
-        for j in range(loop_tx + 1, MAX_ITEM_PER_SM):
-            if (sm1[loop_tx] / 10 ** power) == (sm1[j] / 10 ** power):
-                output_d[(start + loop_tx) * num_elements + (start + j)] = 0
-            else:
-                output_d[(start + loop_tx) * num_elements + (start + j)] = -1
+        if loop_tx < actual_items_per_sm:
+            for j in range(loop_tx + 1, actual_items_per_sm):
+                if (sm1[loop_tx] / (10 ** power)) == (sm1[j] / (10 ** power)):
+                    output_d[(start + loop_tx) * num_elements + (start + j)] = 0
+                # else:
+                #      output_d[(start + loop_tx) * num_elements + (start + j)] = -1
 
 
-    for smid in range(cuda.blockIdx.x + 1, ceil(num_elements / (1.0 * MAX_ITEM_PER_SM))):
-        for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
-            location_x = tx + i * BLOCK_SIZE
-            if location_x < MAX_ITEM_PER_SM:
-                sm2[location_x] = input_d[smid * MAX_ITEM_PER_SM + start + location_x]
+    if (cuda.blockIdx.x + 1) < ceil(num_elements / (1.0 * MAX_ITEM_PER_SM)):
+        current_smid = 0
+        for smid in range(cuda.blockIdx.x + 1, ceil(num_elements / (1.0 * MAX_ITEM_PER_SM))):
+            actual_items_per_secondary_sm = num_elements - current_smid * MAX_ITEM_PER_SM - start - MAX_ITEM_PER_SM
+            if actual_items_per_secondary_sm > MAX_ITEM_PER_SM:
+                actual_items_per_secondary_sm = MAX_ITEM_PER_SM
 
-        cuda.syncthreads()
-
-        for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
-            loop_tx = tx + i * BLOCK_SIZE
-            for j in range(0, MAX_ITEM_PER_SM):
-                if (sm1[loop_tx] / 10 ** power) == (sm2[j] / 10 ** power):
-                    output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = 0
+            for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
+                location_x = tx + i * BLOCK_SIZE
+                if location_x < actual_items_per_secondary_sm and (current_smid * MAX_ITEM_PER_SM + start + location_x) < num_elements:
+                    sm2[location_x] = input_d[(current_smid + 1) * MAX_ITEM_PER_SM + start + location_x]
                 else:
-                    output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + j] = -1
+                    sm2[location_x] = 0
+            cuda.syncthreads()
+
+            for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
+                loop_tx = tx + i * BLOCK_SIZE
+                if loop_tx < actual_items_per_sm:
+                    j = 0
+                    while j < actual_items_per_secondary_sm:
+                        if (sm1[loop_tx] / (10 ** power)) == (sm2[j] / (10 ** power)):
+                            output_d[(start + loop_tx) * num_elements + (current_smid + 1) * MAX_ITEM_PER_SM + start + j] = 0
+                        # else:
+                        #     output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + start + j] = -1
+                        j += 1
+            current_smid += 1
 
     #cuda.syncthreads()
 
@@ -292,10 +321,23 @@ def readFile(file_name):
         if lines >= MAX_TRANSACTIONS: break
         line = line.strip()
         words = line.split(' ')
-        for word in words:
-            transactions[trans_id] = int(word)
+        for word_id in range(0, len(words)):
+            if word_id >= MAX_ITEMS_PER_TRANSACTIONS:
+                print "Warning: Items in transactions exceeding MAX_ITEMS_PER_TRANSACTIONS"
+                break
+            word = words[word_id]
+            try:
+                word = int(word)
+            except:
+                print "Error: Wrong type of item in transaction. Exiting..."
+                sys.exit(10)
+
+            if int(word) >= MAX_UNIQUE_ITEMS:
+                print "Warning: Item in transaction exceeds or equals MAX_UNIQUE_ITEMS"
+                continue
+            transactions[trans_id] = word
             trans_id += 1
-        offsets[lines + 1] = offsets[lines] + len(words)
+        offsets[lines + 1] = offsets[lines] + min([len(words), MAX_ITEMS_PER_TRANSACTIONS])
         lines += 1
 
     return offsets, transactions, lines, trans_id
@@ -386,22 +428,29 @@ def findHigherPatternFrequencyGPU(d_transactions, d_offsets, num_transactions, n
 def test_apriori():
 
     offsets, transactions, num_transactions, num_elements = readFile("dummy.txt")
-    print offsets[:num_transactions]
-    print transactions[:num_transactions]
-    print num_transactions
-    print num_elements
-    min_support = 2
+    print "Offset = ", offsets[:num_transactions]
+    print "transactions = ", transactions[:num_elements]
+    print "Num transactions = ", num_transactions
+    print "Num elements = ", num_elements
+    min_support = MIN_SUPPORT
+
+    # to find number of max digits required to represent that many number of unique items
 
     power = 1
     while MAX_UNIQUE_ITEMS / (10 ** power) != 0:
         power += 1
 
+
     print "Power = ", power
 
     t = [item for item in transactions.tolist()]
 
+    if num_elements > NUM_ELEMENTS:
+        print "Error: Elements exceeding NUM_ELEMENTS. Exiting..."
+        sys.exit(12)
 
     input_h = np.array(t, dtype=np.int32)
+    print "Input transactions = ", list(input_h)
     ci_h = np.zeros(MAX_UNIQUE_ITEMS, dtype=np.int32)
     li_h = np.empty(MAX_UNIQUE_ITEMS, dtype=np.int32)
 
@@ -412,46 +461,63 @@ def test_apriori():
     threads_per_block = (BLOCK_SIZE, 1)
     number_of_blocks = (int(ceil(NUM_ELEMENTS / (1.0 * threads_per_block[0]))), 1)#((NUM_ELEMENTS / threads_per_block[0]) + 1, 1)
 
-    histogramGPU [number_of_blocks, threads_per_block] (input_d, ci_d, NUM_ELEMENTS)
-    cuda.synchronize()
+    histogramGPU [number_of_blocks, threads_per_block] (input_d, ci_d, num_elements)
+    #cuda.synchronize()
+
+    ci_d.copy_to_host(ci_h)
+    print "Ci_H Histogram result = ", ci_h # support count for each item
 
     number_of_blocks = (int(ceil(MAX_UNIQUE_ITEMS / (1.0 * threads_per_block[0]))), 1)
     pruneGPU [number_of_blocks, threads_per_block] (ci_d, MAX_UNIQUE_ITEMS, min_support)
     cuda.synchronize()
 
     ci_d.copy_to_host(ci_h)
-    print ci_h
+    print "Keys = ", [i for i in range(0, len(ci_h))]
+    print "Ci_H Pruning result = ", ci_h # support count for each item
 
-    k = 0
+    # calculate concise list of items satisfying min support
+    k = 0 # number of items whose sup_count > min_support
     for j in range(0, len(ci_h)):
         if ci_h[j] != 0:
             li_h[k] = j
             k += 1
 
-    print "LI_H = ", li_h, k
+    print "LI_H = ", list(li_h)[:k]  #items whose support_count > min_support
 
-    #k = 10000
+    print "K(num_items_with_good_sup_count = ", k
 
+    #k = 102
     ci_h = np.array([-1 for i in range(0, k ** 2)], dtype=np.int32)
     ci_d = cuda.to_device(ci_h)
 
-    #li_h = np.array(sorted([randint(10, 99) for i in range(0, k)]), dtype=np.int32)
+    li_h = np.array(sorted([randint(10, 99) for i in range(0, k)]), dtype=np.int32)
+    #tli_h = np.array([i for i in range(1, k + 1)], dtype=np.int32)
 
     t1 = time()
     li_d = cuda.to_device(li_h)
-    number_of_blocks = (int(ceil(k / MAX_ITEM_PER_SM)), 1)
+    number_of_blocks = (int(ceil(k / (1.0 * MAX_ITEM_PER_SM))), 1)
     selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k, power)
 
     li_d.copy_to_host(li_h)
     ci_d.copy_to_host(ci_h)
     t2 = time()
 
-
+    # f = open('join.txt', 'w')
+    #
+    # for i in range(0, k):
+    #     line = ""
+    #     for j in range(0, k):
+    #         line += str(ci_h[k * i + j]) + " "
+    #     f.write(line + "\n")
+    #
+    # f.close()
     #ci_h = ci_h.reshape(k, k)
 
-    print "Initial Mask = ", ci_h
+    print "Initial Mask = ", ci_h.reshape(k, k)
 
-    print t2 - t1
+    print "Self joining time = ", (t2 - t1)
+
+    sys.exit(0)
 
     d_offsets = cuda.to_device(offsets)
     d_transactions = cuda.to_device(transactions)
@@ -466,7 +532,7 @@ def test_apriori():
     findFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, num_elements, li_d, ci_d, k)
     cuda.synchronize()
     ci_d.copy_to_host(ci_h)
-    print "Final Mask = ", ci_h.reshape(4, 4)
+    print "Final Mask = ", ci_h.reshape(k, k)
     d_transactions.copy_to_host(transactions)
 
     print transactions[:num_elements]
@@ -477,7 +543,7 @@ def test_apriori():
     pruneMultipleGPU [number_of_blocks, threads_per_block] (ci_d, k, min_support)
 
     ci_d.copy_to_host(ci_h)
-    print "Outer Mask = ", ci_h.reshape(4, 4)
+    print "Outer Mask = ", ci_h.reshape(k, k)
 
     ci_hn = np.zeros(k, dtype=np.int32)
     ci_dn = cuda.to_device(ci_hn)
@@ -609,7 +675,7 @@ def test_apriori():
     pruneMultipleGPU [number_of_blocks, threads_per_block] (ci_d, k, min_support)
 
     ci_d.copy_to_host(ci_h)
-    print "Outer Mask = ", ci_h.reshape(4, 4)
+    print "Outer Mask = ", ci_h.reshape(k, k)
     print "K = ", k
 
     ci_hn = np.zeros(k, dtype=np.int32)
@@ -672,7 +738,7 @@ def test_apriori():
         pattern_key = tuple(common_pattern) + tuple(sorted([item1, item2]))
         actual_patterns[pattern_key] = patterns[pattern]
 
-    print actual_patterns
+    print "L2 = ", actual_patterns
 
 
 if __name__ == "__main__":
