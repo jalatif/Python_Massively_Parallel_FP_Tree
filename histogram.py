@@ -96,4 +96,3 @@ def test_histogram():
         print "Test Failed"
 
 test_histogram() # Run the program
-

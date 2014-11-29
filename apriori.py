@@ -13,15 +13,15 @@ import sys
 NUM_ELEMENTS = 32#1000000
 MAX_UNIQUE_ITEMS = 16 # in range 1-6
 MAX_PATTERN_SEARCH = 5
-BLOCK_SIZE = 4
+BLOCK_SIZE = 8 # Please keep it greater than Max Items per transaction
 SM_SIZE = 2 * BLOCK_SIZE
-MAX_ITEM_PER_SM = 16
-MAX_TRANSACTIONS_PER_SM = 8
+MAX_ITEM_PER_SM = 16 #used in self join tunable no bounds
+MAX_TRANSACTIONS_PER_SM = 4
 MAX_ITEMS_PER_TRANSACTIONS = 6
-MAX_TRANSACTIONS = 4
+MAX_TRANSACTIONS = 16
 SM_SHAPE = (MAX_TRANSACTIONS_PER_SM, MAX_ITEMS_PER_TRANSACTIONS)
 SM_MAX_SIZE = 12288
-MIN_SUPPORT = 2
+MIN_SUPPORT = 3
 
 @jit(argtypes=[uint32[:], uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveScanGPU(aux_d, out_d, in_d, size):
@@ -154,9 +154,8 @@ def pruneMultipleGPU(input_d, num_patterns, min_sup):
     index_x = cuda.threadIdx.x + cuda.blockDim.x * cuda.blockIdx.x
     index_y = cuda.threadIdx.y + cuda.blockDim.y * cuda.blockIdx.y
 
-    data_index = index_y * num_patterns + index_x
-
-    if data_index < num_patterns * num_patterns:
+    if index_x < num_patterns and index_y < num_patterns:
+        data_index = index_y * num_patterns + index_x
         if input_d[data_index] < min_sup:
             input_d[data_index] = 0
 
@@ -249,14 +248,17 @@ def findFrequencyGPU(d_transactions, d_offsets, num_transactions, num_elements, 
             Ts[i, tx] = d_transactions[d_offsets[trans_index + i] + tx]
             #d_transactions[d_offsets[trans_index + i] + tx] += 1
 
-    cuda.syncthreads()
+        cuda.syncthreads()
 
     for mask_id in range(0, int(ceil(num_patterns / 1.0 * cuda.blockDim.x))):
         loop_tx = cuda.threadIdx.x + mask_id * cuda.blockDim.x
 
+        if loop_tx >= num_patterns:
+            continue
+
         for last_seen in range(0, num_patterns):
             if dMask[loop_tx * num_patterns + last_seen] < 0:
-                last_seen += 1
+                #last_seen += 1
                 continue
             item1 = dkeyIndex[loop_tx]
             item2 = dkeyIndex[last_seen]
@@ -342,8 +344,9 @@ def readFile(file_name):
 
     return offsets, transactions, lines, trans_id
 
-@jit(argtypes=[int32[:], int32[:], int32, int32, int32[:], int32[:], int32, int32[:], int32[:]], target='gpu')
-def findHigherPatternFrequencyGPU(d_transactions, d_offsets, num_transactions, num_elements, dkeyIndex, dMask, num_patterns, api_d, iil_d):
+
+@jit(argtypes=[int32[:], int32[:], int32, int32, int32[:], int32[:], int32, int32[:], int32[:], int32, int32, int32], target='gpu')
+def findHigherPatternFrequencyGPU(d_transactions, d_offsets, num_transactions, num_elements, dkeyIndex, dMask, num_patterns, api_d, iil_d, power, size_api_d, size_iil_d):
     Ts = cuda.shared.array(SM_SHAPE, int32)
     tx = cuda.threadIdx.x
 
@@ -368,61 +371,55 @@ def findHigherPatternFrequencyGPU(d_transactions, d_offsets, num_transactions, n
             Ts[i, tx] = d_transactions[d_offsets[trans_index + i] + tx]
             #d_transactions[d_offsets[trans_index + i] + tx] += 1
 
-    cuda.syncthreads()
+        cuda.syncthreads()
 
-    for mask_id in range(0, int(ceil(num_patterns / 1.0 * cuda.blockDim.x))):
-        loop_tx = cuda.threadIdx.x + mask_id * cuda.blockDim.x
-
+    for mask_id in range(0, int(ceil(num_patterns / (1.0 * BLOCK_SIZE)))):
+        loop_tx = tx + mask_id * BLOCK_SIZE
+        if loop_tx >= num_patterns:
+            continue
         for last_seen in range(0, num_patterns):
             if dMask[loop_tx * num_patterns + last_seen] < 0:
-                last_seen += 1
                 continue
-            vpat1 = dkeyIndex[loop_tx]
-            vpat2 = dkeyIndex[last_seen]
+            hp1 = dkeyIndex[loop_tx]
+            hp2 = dkeyIndex[last_seen]
 
-            v_common_pat = vpat1 / 10
-            vitem1 = vpat1 % 10
-            vitem2 = vpat2 % 10
+            vitem1 = hp1 % (10 ** power)
+            vitem2 = hp2 % (10 ** power)
 
-            item1 = api_d[iil_d[(vitem1-1) * 3 + 1]]
-            item2 = api_d[iil_d[(vitem2-1) * 3 + 1]]
+            if ((vitem1 - 1) * 3 + 1) < size_iil_d and ((vitem2 - 1) * 3 + 1) < size_iil_d:
+                index_item1 = iil_d[(vitem1 - 1) * 3 + 1]
+                index_item2 = iil_d[(vitem2 - 1) * 3 + 1]
 
-            pattern_items = cuda.shared.array(MAX_PATTERN_SEARCH, int32)
-            flag_pattern_items = cuda.shared.array(MAX_PATTERN_SEARCH, int32)
+                if index_item1 < size_api_d and index_item2 < size_api_d:
+                    item1 = api_d[index_item1]
+                    item2 = api_d[index_item2]
+                else:
+                    continue
+            else:
+                continue
 
-            common_pat_start = iil_d[(v_common_pat-1) * 3 + 1]
-            common_pat_length = iil_d[(v_common_pat-1) * 3 + 2]
-            common_pat_end = common_pat_start + common_pat_length
+            vcommon_pattern = hp1 / (10 ** power)
 
-            # if loop_tx == 0 and tx == 0:
-            #     print -1
-            #     print -1
-            #     print v_common_pat
-            #     print common_pat_start
-            #     print common_pat_end
-            #     print -1
-            #     print -1
-            for item_id in range(common_pat_start, common_pat_end):
-                pattern_items[item_id - common_pat_start] = api_d[item_id]
-
+            if ((vcommon_pattern - 1) * 3 + 1) < size_iil_d:
+                index_vpat1 = iil_d[(vcommon_pattern - 1) * 3 + 1]
+                if index_vpat1 < size_api_d:
+                    vpat1 = api_d[index_vpat1]#array of max patterns
+                else:
+                    continue
+            else:
+                continue
 
             for tid in range(0, MAX_TRANSACTIONS_PER_SM):
-                flag_item1 = False
-                flag_item2 = False
-
+                flag1 = False
+                flag2 = False
+                fpat1 = False
                 for titem in range(0, MAX_ITEMS_PER_TRANSACTIONS):
-                    if Ts[tid, titem] == item1: flag_item1 = True
-                    elif Ts[tid, titem] == item2: flag_item2 = True
-                    for item_id in range(0, common_pat_length):
-                        if Ts[tid, titem] == pattern_items[item_id]: flag_pattern_items[item_id] = 1
+                    if Ts[tid, titem] == item1: flag1 = True
+                    elif Ts[tid, titem] == item2: flag2 = True
+                    elif Ts[tid, titem] == vpat1: fpat1 = True
 
-                pattern_flag = 1
-                for item_id in range(0, common_pat_length):
-                    pattern_flag = pattern_flag * flag_pattern_items[item_id]
-
-                present_flag = flag_item1 and flag_item2
-
-                if present_flag and (pattern_flag == 1):
+                present_flag = flag1 and flag2 and fpat1
+                if present_flag:
                     cuda.atomic.add(dMask, loop_tx * num_patterns + last_seen, 1)
 
 def test_apriori():
@@ -490,7 +487,7 @@ def test_apriori():
     ci_h = np.array([-1 for i in range(0, k ** 2)], dtype=np.int32)
     ci_d = cuda.to_device(ci_h)
 
-    li_h = np.array(sorted([randint(10, 99) for i in range(0, k)]), dtype=np.int32)
+    #li_h = np.array(sorted([randint(10, 99) for i in range(0, k)]), dtype=np.int32)
     #tli_h = np.array([i for i in range(1, k + 1)], dtype=np.int32)
 
     t1 = time()
@@ -517,30 +514,26 @@ def test_apriori():
 
     print "Self joining time = ", (t2 - t1)
 
-    sys.exit(0)
-
     d_offsets = cuda.to_device(offsets)
     d_transactions = cuda.to_device(transactions)
 
-    threads_per_block = (BLOCK_SIZE, 1)
     #number_of_blocks = (1, 1) #(int(num_transactions / (1.0 * threads_per_block[0])) + 1, 1)
     number_of_blocks = (int(ceil(num_transactions / (1.0 * MAX_TRANSACTIONS_PER_SM))), 1)
+    print "Num blocks for findFrequency = ", number_of_blocks
 
     print "Num transactions = ", num_transactions
     print "Num patterns = ", k
-    print "index = ", li_h
+    print "index = ", list(li_h)[:k]
     findFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, num_elements, li_d, ci_d, k)
     cuda.synchronize()
     ci_d.copy_to_host(ci_h)
     print "Final Mask = ", ci_h.reshape(k, k)
     d_transactions.copy_to_host(transactions)
 
-    print transactions[:num_elements]
-
     threads_per_block = (BLOCK_SIZE, BLOCK_SIZE)
     number_of_blocks = ((int(ceil(k / (1.0 * threads_per_block[0])))), (int(ceil(k / (1.0 * threads_per_block[0])))))
 
-    pruneMultipleGPU [number_of_blocks, threads_per_block] (ci_d, k, min_support)
+    pruneMultipleGPU [number_of_blocks, threads_per_block] (ci_d, k, min_support) # prunes according to min_support
 
     ci_d.copy_to_host(ci_h)
     print "Outer Mask = ", ci_h.reshape(k, k)
@@ -548,7 +541,7 @@ def test_apriori():
     ci_hn = np.zeros(k, dtype=np.int32)
     ci_dn = cuda.to_device(ci_hn)
 
-    combinationsAvailable [threads_per_block, number_of_blocks] (ci_d, ci_dn, k)
+    combinationsAvailable [threads_per_block, number_of_blocks] (ci_d, ci_dn, k) #Number of possible patterns in each row
 
     ci_dn.copy_to_host(ci_hn)
 
@@ -557,7 +550,7 @@ def test_apriori():
     ci_hnx = np.empty(k, dtype=np.int32)
     ci_dnx = cuda.to_device(ci_hnx)
 
-    preScan(ci_dnx, ci_dn, k)
+    preScan(ci_dnx, ci_dn, k) # Prefix sum on patterns in each row
 
     ci_dnx.copy_to_host(ci_hnx)
     num_patterns = ci_hnx[-1]
@@ -582,7 +575,10 @@ def test_apriori():
         item2 = sparseM_h[i + num_patterns]
         support = sparseM_h[i + 2 * num_patterns]
         patterns[tuple(sorted([li_h[item1], li_h[item2]]))] = support
-    print patterns
+
+    print "\n=======================================================\n"
+    print "L1 = ", patterns
+    print "\n=======================================================\n"
 
     new_modulo_map = {}
     index_id = 1
@@ -609,8 +605,8 @@ def test_apriori():
             index_id += 1
 
 
-    print "Actual pattern items = ", actual_pattern_items
-    print "Index lookup = ", index_items_lookup
+    #print "Actual pattern items = ", actual_pattern_items
+    #print "Index lookup = ", index_items_lookup
     print new_modulo_map
 
     new_patterns = []
@@ -637,7 +633,7 @@ def test_apriori():
 
     t1 = time()
     li_d = cuda.to_device(li_h)
-    number_of_blocks = (int(ceil(k / MAX_ITEM_PER_SM)), 1)
+    number_of_blocks = (int(ceil(k / (1.0 * MAX_ITEM_PER_SM))), 1)
     selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k, power)
 
     li_d.copy_to_host(li_h)
@@ -649,25 +645,29 @@ def test_apriori():
     api_d = cuda.to_device(api_h)
     iil_d = cuda.to_device(iil_h)
 
-
+    print "Api_h = ", list(api_h), " Size = ", api_h.size
+    print "IIL_H = ", list(iil_h), " Size = ", iil_h.size
     t2 = time()
     print "LI_H = ", li_h
-    print "Initial Mask = ", ci_h
+    print "Initial Mask = ", ci_h.reshape(k, k)
 
-    threads_per_block = (BLOCK_SIZE, 1)
     #number_of_blocks = (1, 1) #(int(num_transactions / (1.0 * threads_per_block[0])) + 1, 1)
     number_of_blocks = (int(ceil(num_transactions / (1.0 * MAX_TRANSACTIONS_PER_SM))), 1)
 
     print "Num transactions = ", num_transactions
     print "Num patterns = ", k
     print "index = ", li_h
-    findHigherPatternFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, num_elements, li_d, ci_d, k, api_d, iil_d)
+    print "Size of api_d = ", api_h.size
+    print "Size of iil_h = ", iil_h.size
+    findHigherPatternFrequencyGPU [number_of_blocks, threads_per_block] (d_transactions, d_offsets, num_transactions, num_elements, li_d, ci_d, k, api_d, iil_d, power, api_h.size, iil_h.size)
     cuda.synchronize()
     ci_d.copy_to_host(ci_h)
-    print "Final Mask = ", ci_h
-    d_transactions.copy_to_host(transactions)
 
-    print transactions[:num_elements]
+
+    print "Final Mask = ", ci_h.reshape(k, k)
+    #d_transactions.copy_to_host(transactions)
+
+    #print transactions[:num_elements]
 
     threads_per_block = (BLOCK_SIZE, BLOCK_SIZE)
     number_of_blocks = ((int(ceil(k / (1.0 * threads_per_block[0])))), (int(ceil(k / (1.0 * threads_per_block[0])))))
@@ -721,9 +721,9 @@ def test_apriori():
     actual_patterns = {}
 
     for pattern in patterns:
-        v_common_pat = pattern[0] / 10
-        vitem1 = pattern[0] % 10
-        vitem2 = pattern[1] % 10
+        v_common_pat = pattern[0] / (10 ** power)
+        vitem1 = pattern[0] % (10 ** power)
+        vitem2 = pattern[1] % (10 ** power)
 
         item1 = actual_pattern_items[index_items_lookup[(vitem1-1) * 3 + 1]]
         item2 = actual_pattern_items[index_items_lookup[(vitem2-1) * 3 + 1]]
@@ -738,7 +738,9 @@ def test_apriori():
         pattern_key = tuple(common_pattern) + tuple(sorted([item1, item2]))
         actual_patterns[pattern_key] = patterns[pattern]
 
+    print "\n=======================================================\n"
     print "L2 = ", actual_patterns
+    print "\n=======================================================\n"
 
 
 if __name__ == "__main__":

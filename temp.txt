@@ -1,0 +1,24 @@
+#             common_pat_start  =  iil_d[(v_common_pat-1) * 3 + 1]
+#             common_pat_length = iil_d[(v_common_pat-1) * 3 + 2]
+#             common_pat_end = common_pat_start + common_pat_length
+
+#             #for item_id in range(common_pat_start, common_pat_end):
+#             # pattern_items1 = api_d[common_pat_start]#pattern_items[(item_id - common_pat_start)] = api_d[item_id]
+
+                # flag array should be false
+
+#             #     for titem in range(0, MAX_ITEMS_PER_TRANSACTIONS):
+#             #         if Ts[tid, titem] == item1: flag_item1 = True
+#             #         elif Ts[tid, titem] == item2: flag_item2 = True
+#             #         #for item_id in range(0, common_pat_length):
+#             #         #    if Ts[tid, titem] == pattern_items[item_id]: flag_pattern_items[item_id] = 1
+#             #         if Ts[tid, titem] == pattern_items1: flag_pattern_items1 = 1
+#             #
+#             #     pattern_flag = 1
+#             #     #for item_id in range(0, common_pat_length):
+#             #     #    pattern_flag = pattern_flag * flag_pattern_items[item_id]
+#             #     pattern_flag = pattern_flag * flag_pattern_items1
+#             #
+#             #     present_flag = flag_item1 and flag_item2
+#             #
+#             #     if present_flag and (pattern_flag == 1):
