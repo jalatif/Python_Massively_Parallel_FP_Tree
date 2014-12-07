@@ -10,18 +10,20 @@ from math import ceil
 from pprint import pprint
 import sys
 
-NUM_ELEMENTS = 32#1000000
-MAX_UNIQUE_ITEMS = 16 # in range 1-6
-MAX_PATTERN_SEARCH = 5
-BLOCK_SIZE = 8 # Please keep it greater than Max Items per transaction
+MIN_SUPPORT = 3
+BLOCK_SIZE = 16 # Please keep it greater than Max Items per transaction
+MAX_TRANSACTIONS = 32
+MAX_ITEMS_PER_TRANSACTIONS = 16
+MAX_UNIQUE_ITEMS = 32 # in range 1-6
+
+NUM_ELEMENTS = MAX_TRANSACTIONS * MAX_ITEMS_PER_TRANSACTIONS#1000000
+
+MAX_PATTERN_SEARCH = 3
 SM_SIZE = 2 * BLOCK_SIZE
-MAX_ITEM_PER_SM = 16 #used in self join tunable no bounds
-MAX_TRANSACTIONS_PER_SM = 4
-MAX_ITEMS_PER_TRANSACTIONS = 6
-MAX_TRANSACTIONS = 16
+MAX_ITEM_PER_SM = 32#MAX_UNIQUE_ITEMS #used in self join tunable no bounds
+MAX_TRANSACTIONS_PER_SM = 32
 SM_SHAPE = (MAX_TRANSACTIONS_PER_SM, MAX_ITEMS_PER_TRANSACTIONS)
 SM_MAX_SIZE = 12288
-MIN_SUPPORT = 3
 
 @jit(argtypes=[uint32[:], uint32[:], uint32[:], uint32], target='gpu')
 def exclusiveScanGPU(aux_d, out_d, in_d, size):
@@ -179,6 +181,10 @@ def selfJoinGPU(input_d, output_d, num_elements, power):
             sm1[location_x] = input_d[start + location_x]
         else:
             sm1[location_x] = 0
+        if cuda.blockIdx.x == 2 and sm1[location_x] == 405:
+            print -3
+            print location_x
+            print -3
 
     cuda.syncthreads()
 
@@ -192,33 +198,61 @@ def selfJoinGPU(input_d, output_d, num_elements, power):
                 # else:
                 #      output_d[(start + loop_tx) * num_elements + (start + j)] = -1
 
+    cuda.syncthreads()
 
-    if (cuda.blockIdx.x + 1) < ceil(num_elements / (1.0 * MAX_ITEM_PER_SM)):
-        current_smid = 0
-        for smid in range(cuda.blockIdx.x + 1, ceil(num_elements / (1.0 * MAX_ITEM_PER_SM))):
-            actual_items_per_secondary_sm = num_elements - current_smid * MAX_ITEM_PER_SM - start - MAX_ITEM_PER_SM
-            if actual_items_per_secondary_sm > MAX_ITEM_PER_SM:
-                actual_items_per_secondary_sm = MAX_ITEM_PER_SM
+    # if (cuda.blockIdx.x + 1) < ceil(num_elements / (1.0 * MAX_ITEM_PER_SM)):
+    #     pass
+    current_smid = 0
+    for smid in range(cuda.blockIdx.x + 1, ceil(num_elements / (1.0 * MAX_ITEM_PER_SM))):
+        actual_items_per_secondary_sm = num_elements - current_smid * MAX_ITEM_PER_SM - start - MAX_ITEM_PER_SM
+        if actual_items_per_secondary_sm > MAX_ITEM_PER_SM:
+            actual_items_per_secondary_sm = MAX_ITEM_PER_SM
+        for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
+            location_x = tx + i * BLOCK_SIZE
+            temp = sm1[3]
+            if location_x < actual_items_per_secondary_sm and (current_smid * MAX_ITEM_PER_SM + start + location_x) < num_elements:
+                if cuda.blockIdx.x == 2 and tx == 0:
+                    print 99
+                    print sm1[3]
+                    print 99
+                sm2[location_x] = input_d[(current_smid + 1) * MAX_ITEM_PER_SM + start + location_x]
+            else:
+                sm2[location_x] = 0
+            if cuda.blockIdx.x == 2 and tx == 0:
+                print 100
+                print sm1[3]
+                print 100
+            if cuda.blockIdx.x == 2 and sm2[location_x] == 406:
+                print -2
+                print location_x
+                print sm2[location_x]
+                print sm1[0]
+                print sm1[1]
+                print sm1[2]
+                print sm1[3]
+                print -2
+        cuda.syncthreads()
+        if cuda.blockIdx.x == 2:
+            sm1[3] = 405
+        cuda.syncthreads()
 
-            for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
-                location_x = tx + i * BLOCK_SIZE
-                if location_x < actual_items_per_secondary_sm and (current_smid * MAX_ITEM_PER_SM + start + location_x) < num_elements:
-                    sm2[location_x] = input_d[(current_smid + 1) * MAX_ITEM_PER_SM + start + location_x]
-                else:
-                    sm2[location_x] = 0
-            cuda.syncthreads()
+        for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
+            loop_tx = tx + i * BLOCK_SIZE
 
-            for i in range(0, ceil(MAX_ITEM_PER_SM / (1.0 * BLOCK_SIZE))):
-                loop_tx = tx + i * BLOCK_SIZE
-                if loop_tx < actual_items_per_sm:
-                    j = 0
-                    while j < actual_items_per_secondary_sm:
-                        if (sm1[loop_tx] / (10 ** power)) == (sm2[j] / (10 ** power)):
-                            output_d[(start + loop_tx) * num_elements + (current_smid + 1) * MAX_ITEM_PER_SM + start + j] = 0
-                        # else:
-                        #     output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + start + j] = -1
-                        j += 1
-            current_smid += 1
+            if sm1[loop_tx] == 405:
+                print -1
+                print sm2[0]
+                print -1
+
+            if loop_tx < actual_items_per_sm:
+                j = 0
+                while j < actual_items_per_secondary_sm:
+                    if (sm1[loop_tx] / (10 ** power)) == (sm2[j] / (10 ** power)):
+                        output_d[(start + loop_tx) * num_elements + (current_smid + 1) * MAX_ITEM_PER_SM + start + j] = 0
+                    # else:
+                    #     output_d[(start + loop_tx) * num_elements + smid * MAX_ITEM_PER_SM + start + j] = -1
+                    j += 1
+        current_smid += 1
 
     #cuda.syncthreads()
 
@@ -309,42 +343,6 @@ def selfJoinCPU(input_cpu):
                 output_cpu.append((input_cpu[i], input_cpu[j]))
     return output_cpu
 
-def readFile(file_name):
-    fp = open(file_name, 'r')
-
-    transactions = np.empty(MAX_ITEMS_PER_TRANSACTIONS * MAX_TRANSACTIONS, dtype=np.int32)
-    offsets = np.empty(MAX_TRANSACTIONS + 1, dtype=np.int32)
-    offsets[0] = 0
-
-    trans_id = 0
-    lines = 0
-
-    for line in fp:
-        if lines >= MAX_TRANSACTIONS: break
-        line = line.strip()
-        words = line.split(' ')
-        for word_id in range(0, len(words)):
-            if word_id >= MAX_ITEMS_PER_TRANSACTIONS:
-                print "Warning: Items in transactions exceeding MAX_ITEMS_PER_TRANSACTIONS"
-                break
-            word = words[word_id]
-            try:
-                word = int(word)
-            except:
-                print "Error: Wrong type of item in transaction. Exiting..."
-                sys.exit(10)
-
-            if int(word) >= MAX_UNIQUE_ITEMS:
-                print "Warning: Item in transaction exceeds or equals MAX_UNIQUE_ITEMS"
-                continue
-            transactions[trans_id] = word
-            trans_id += 1
-        offsets[lines + 1] = offsets[lines] + min([len(words), MAX_ITEMS_PER_TRANSACTIONS])
-        lines += 1
-
-    return offsets, transactions, lines, trans_id
-
-
 @jit(argtypes=[int32[:], int32[:], int32, int32, int32[:], int32[:], int32, int32[:], int32[:], int32, int32, int32], target='gpu')
 def findHigherPatternFrequencyGPU(d_transactions, d_offsets, num_transactions, num_elements, dkeyIndex, dMask, num_patterns, api_d, iil_d, power, size_api_d, size_iil_d):
     Ts = cuda.shared.array(SM_SHAPE, int32)
@@ -422,9 +420,60 @@ def findHigherPatternFrequencyGPU(d_transactions, d_offsets, num_transactions, n
                 if present_flag:
                     cuda.atomic.add(dMask, loop_tx * num_patterns + last_seen, 1)
 
+def readFile(file_name):
+    fp = open(file_name, 'r')
+
+    transactions = np.empty(MAX_ITEMS_PER_TRANSACTIONS * MAX_TRANSACTIONS, dtype=np.int32)
+    offsets = np.empty(MAX_TRANSACTIONS + 1, dtype=np.int32)
+    offsets[0] = 0
+
+    trans_id = 0
+    lines = 0
+
+    for line in fp:
+        if lines >= MAX_TRANSACTIONS: break
+        line = line.strip()
+        words = line.split(' ')
+        for word_id in range(0, len(words)):
+            if word_id >= MAX_ITEMS_PER_TRANSACTIONS:
+                print "Warning: Items in transactions exceeding MAX_ITEMS_PER_TRANSACTIONS"
+                break
+            word = words[word_id]
+            try:
+                word = int(word)
+            except:
+                print "Error: Wrong type of item in transaction. Exiting..."
+                sys.exit(10)
+
+            if int(word) >= MAX_UNIQUE_ITEMS:
+                print "Warning: Item in transaction exceeds or equals MAX_UNIQUE_ITEMS"
+                continue
+            transactions[trans_id] = word
+            trans_id += 1
+        offsets[lines + 1] = offsets[lines] + min([len(words), MAX_ITEMS_PER_TRANSACTIONS])
+        lines += 1
+
+    return offsets, transactions, lines, trans_id
+
+def createFormattedPatterns(patterns, i):
+
+    line = "\n=====================================================\n"
+    line += "L" + str(i) + " patterns = \n"
+    for pattern in patterns:
+        line += "("
+        for item in pattern:
+            line += str(item) + ","
+        line = line[:-1]
+        line += ") : " + str(patterns[pattern]) + "\n"
+    line += "\n=====================================================\n"
+
+    return line
+
 def test_apriori():
 
-    offsets, transactions, num_transactions, num_elements = readFile("dummy.txt")
+    output_file = open("apriori_out.txt", "w")
+
+    offsets, transactions, num_transactions, num_elements = readFile("syncthetic_data.txt")
     print "Offset = ", offsets[:num_transactions]
     print "transactions = ", transactions[:num_elements]
     print "Num transactions = ", num_transactions
@@ -448,6 +497,7 @@ def test_apriori():
 
     input_h = np.array(t, dtype=np.int32)
     print "Input transactions = ", list(input_h)
+    print "Size of transactions = ", input_h.size
     ci_h = np.zeros(MAX_UNIQUE_ITEMS, dtype=np.int32)
     li_h = np.empty(MAX_UNIQUE_ITEMS, dtype=np.int32)
 
@@ -473,13 +523,20 @@ def test_apriori():
     print "Ci_H Pruning result = ", ci_h # support count for each item
 
     # calculate concise list of items satisfying min support
+    l1_patterns = {}
+
     k = 0 # number of items whose sup_count > min_support
     for j in range(0, len(ci_h)):
         if ci_h[j] != 0:
             li_h[k] = j
+            l1_patterns[(j, )] = ci_h[j]
             k += 1
 
-    print "LI_H = ", list(li_h)[:k]  #items whose support_count > min_support
+    print "\n=======================================================\n"
+    print "L1 = ", list(li_h)[:k]  #items whose support_count > min_support
+    print "\n=======================================================\n"
+
+    output_file.write(createFormattedPatterns(l1_patterns, 1))
 
     print "K(num_items_with_good_sup_count = ", k
 
@@ -493,12 +550,17 @@ def test_apriori():
     t1 = time()
     li_d = cuda.to_device(li_h)
     number_of_blocks = (int(ceil(k / (1.0 * MAX_ITEM_PER_SM))), 1)
+    print "Self join 2 number of blocks = ", number_of_blocks
+    print "K = ", k
+    print "Ci_H size = ", ci_h.size
+    print "LI_H size = ", li_h.size
     selfJoinGPU [number_of_blocks, threads_per_block](li_d, ci_d, k, power)
-
+    cuda.synchronize()
     li_d.copy_to_host(li_h)
     ci_d.copy_to_host(ci_h)
     t2 = time()
 
+    #sys.exit(0)
     # f = open('join.txt', 'w')
     #
     # for i in range(0, k):
@@ -577,8 +639,10 @@ def test_apriori():
         patterns[tuple(sorted([li_h[item1], li_h[item2]]))] = support
 
     print "\n=======================================================\n"
-    print "L1 = ", patterns
+    print "L2 = ", patterns
     print "\n=======================================================\n"
+
+    output_file.write(createFormattedPatterns(patterns, 2))
 
     new_modulo_map = {}
     index_id = 1
@@ -587,7 +651,7 @@ def test_apriori():
     index_items_lookup = []
 
     #patterns = {(2, 3, 5) : 1, (2, 3, 6) : 1, (2, 3, 7) : 1, (2, 4, 5) : 1, (2, 4, 7) : 1, (3, 5, 7) : 1}
-    for pattern in patterns:
+    for pattern in sorted(patterns.keys()):
         if pattern[:-1] not in new_modulo_map:
             new_modulo_map[pattern[:-1]] = index_id
             prev_len = len(actual_pattern_items)
@@ -739,9 +803,12 @@ def test_apriori():
         actual_patterns[pattern_key] = patterns[pattern]
 
     print "\n=======================================================\n"
-    print "L2 = ", actual_patterns
+    print "L3 = ", actual_patterns
     print "\n=======================================================\n"
 
+    output_file.write(createFormattedPatterns(actual_patterns, 3))
+
+    output_file.close()
 
 if __name__ == "__main__":
     test_apriori()
